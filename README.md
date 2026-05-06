@@ -215,14 +215,6 @@ Before each block is analyzed, the script resets the local Anvil fork:
 anvil_reset -> selected historical block
 ```
 
-The reset uses the archive RPC endpoint as the fork source:
-
-```env
-HTTP_ARCHIVE_RPC_URL=
-```
-
-This allows the script to analyze Ethereum state as it existed at a specific historical block.
-
 The project was designed for:
 
 ```text
