@@ -1,3 +1,4 @@
+import time
 import itertools
 from dotenv import load_dotenv
 import os
@@ -6,10 +7,11 @@ from functools import lru_cache
 from web3 import Web3
 from pprint import pprint
 
-from abi_loader import load_abi
-
-
 load_dotenv()
+from abi_loader import load_abi
+import metrics
+
+
 getcontext().prec = 90
 
 def to_bool(v: str) -> bool:
@@ -117,9 +119,17 @@ def contract(address, abi):
 
 
 def eth_call(fn):
-    if BLOCK_IDENTIFIER is not None:
-        return fn.call(block_identifier=BLOCK_IDENTIFIER)
-    return fn.call()
+    metrics.ETH_CALL_TOTAL.inc()
+
+    try:
+        if BLOCK_IDENTIFIER is not None:
+            return fn.call(block_identifier=BLOCK_IDENTIFIER)
+
+        return fn.call()
+
+    except Exception:
+        metrics.ETH_CALL_ERRORS_TOTAL.inc()
+        raise
 
 
 @lru_cache(maxsize=None)
@@ -248,6 +258,8 @@ def read_v2_pool(dex_name, factory_address, fee, token_a, token_b):
         "fee": Decimal(str(fee)),
     }
 
+    metrics.POOLS_DISCOVERED_TOTAL.labels(dex=dex_name, type="v2").inc()
+
     dbg(f"[DISCOVER][V2] found {pool_name(pool)}")
     return pool
 
@@ -322,6 +334,8 @@ def read_v3_pool(dex_name, factory_address, quoter_address, token_a, token_b, fe
         "sqrtPriceX96": sqrt_price_x96,
         "tick": tick,
     }
+
+    metrics.POOLS_DISCOVERED_TOTAL.labels(dex=dex_name, type="v3").inc()
 
     dbg(f"[DISCOVER][V3] found {pool_name(pool)}")
     return pool
@@ -496,10 +510,7 @@ def quote_v3(pool, token_in, token_out, amount_in):
             0
         )
 
-        if BLOCK_IDENTIFIER is not None:
-            amount_out = fn.call(block_identifier=BLOCK_IDENTIFIER)
-        else:
-            amount_out = fn.call()
+        amount_out = eth_call(fn)
 
         amount_out = int(amount_out)
         V3_QUOTE_CACHE[key] = amount_out
@@ -809,6 +820,8 @@ def ternary_search_optimal_amount(
         if m1 <= 0 or m2 <= 0 or m1 == m2:
             break
 
+        metrics.OPTIMIZER_ITERATIONS_TOTAL.inc()
+
         r1 = route_profit(pool_a, pool_b, token_start, token_mid, m1)
         r2 = route_profit(pool_a, pool_b, token_start, token_mid, m2)
 
@@ -942,9 +955,12 @@ def check_with_optimizer(pool_a, pool_b, token_start, token_mid):
 
 
 def check_direction(pool_a, pool_b, token_start, token_mid):
-    dbg(f"\n[CHECK] {pool_a['type']}/{pool_b['type']} | {token_label(token_start)} -> {token_label(token_mid)} -> {token_label(token_start)}")
-    dbg(f"  A: {pool_name(pool_a)}")
-    dbg(f"  B: {pool_name(pool_b)}")
+    route_type = f'{pool_a["type"]}/{pool_b["type"]}'
+    metrics.ROUTES_EVALUATED_TOTAL.labels(route_type=route_type).inc()
+
+    dbg(f"\n[CHECK] {route_type} | {token_label(token_start)} -> {token_label(token_mid)} -> {token_label(token_start)}")
+    dbg(f" A: {pool_name(pool_a)}")
+    dbg(f" B: {pool_name(pool_b)}")
 
     if pool_a["type"] == "v2" and pool_b["type"] == "v2":
         return check_v2_v2(pool_a, pool_b, token_start, token_mid)
@@ -1028,10 +1044,10 @@ def profit_human_value(op):
 
 def estimate_profit_usd(op):
     """
-        Approximate ranking value in USD-like units
+        Approximate ranking value in USD units
 
         This is only for sorting/display. Execution math still uses raw token units
-        For stablecoin-start routes, profit is already USD-like. For WETH-start
+        For stablecoin-start routes, profit is already USD. For WETH-start
         WETH/stable routes, use the realized first-leg average price as a simple
         local conversion proxy
     """
@@ -1189,23 +1205,35 @@ def scan_block(block_number):
 
     all_opportunities.sort(key=opportunity_sort_key, reverse=True)
 
+    if all_opportunities:
+        metrics.GROSS_OPPORTUNITIES_TOTAL.inc(len(all_opportunities))
+
+        for op in all_opportunities:
+            metrics.observe_gross_profit_usd_approx(estimate_profit_usd(op))
+
     print_final_summary(all_opportunities, BLOCK_IDENTIFIER)
 
     return all_opportunities
 
 
 def reset_anvil_to_block(w3: Web3, block_number: int) -> bool:
-    resp = w3.provider.make_request(
-        "anvil_reset",
-        [
-            {
-                "forking": {
-                    "jsonRpcUrl": HTTP_ARCHIVE_RPC_URL,
-                    "blockNumber": block_number,
+    started = time.perf_counter()
+
+    try:
+        resp = w3.provider.make_request(
+            "anvil_reset",
+            [
+                {
+                    "forking": {
+                        "jsonRpcUrl": HTTP_ARCHIVE_RPC_URL,
+                        "blockNumber": block_number,
+                    }
                 }
-            }
-        ],
-    )
+            ],
+        )
+    finally:
+        duration_ms = (time.perf_counter() - started) * 1000
+        metrics.ANVIL_RESET_LATENCY_MS.observe(duration_ms)
 
     if "error" in resp:
         print(f"[anvil_reset error] block={block_number}")
@@ -1228,6 +1256,8 @@ def reset_anvil_to_block(w3: Web3, block_number: int) -> bool:
 
 
 def main():
+    metrics.start_metrics_server()
+
     ensure_connected()
     validate_block_range()
     print_startup_info()
@@ -1238,6 +1268,7 @@ def main():
             continue
 
         scan_block(block_number)
+        metrics.BLOCKS_SCANNED.inc()
 
 
 if __name__ == "__main__":

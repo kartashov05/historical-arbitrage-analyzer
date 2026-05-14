@@ -35,6 +35,7 @@ This project demonstrates practical work with:
 * Numerical optimization for routes involving V3
 * Gross profit calculation before execution costs
 * Python-based DeFi research infrastructure
+* Prometheus-compatible runtime metrics for historical backtest observability
 
 ---
 
@@ -82,6 +83,7 @@ It finds mathematical gross opportunities in historical pool states. Any real ex
 * Approximate USD-like sorting for mixed WETH and stablecoin results
 * Debug mode for detailed route, pool, and optimizer diagnostics
 * Quiet mode for block-level result summaries
+* Lightweight Prometheus `/metrics` endpoint for counters, gauges, and histograms
 
 ---
 
@@ -416,6 +418,88 @@ For Ethereum mainnet, dust profits such as 1e-8 to 1e-6 WETH are usually not exe
 
 ---
 
+## Prometheus Metrics
+
+The analyzer exposes a lightweight Prometheus-compatible HTTP endpoint while the backtest is running.
+
+Default endpoint:
+
+```text
+http://127.0.0.1:9100/metrics
+```
+
+The endpoint is always enabled. Only the bind address and port are configurable:
+
+```env
+METRICS_ADDR=127.0.0.1
+METRICS_PORT=9100
+```
+
+Metrics can be inspected directly with:
+
+```bash
+curl http://127.0.0.1:9100/metrics
+```
+
+### Custom Metrics
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `blocks_scanned_total` | Counter | Number of historical blocks successfully scanned by the backtest |
+| `anvil_reset_latency_ms` | Histogram | Latency distribution for `anvil_reset` calls before historical block analysis |
+| `eth_call_total` | Counter | Number of historical Ethereum `eth_call` requests executed by the analyzer |
+| `eth_call_errors_total` | Counter | Number of failed historical Ethereum `eth_call` requests |
+| `pools_discovered_total{dex,type}` | Counter | Number of discovered pools grouped by DEX source and pool type |
+| `routes_evaluated_total{route_type}` | Counter | Number of evaluated arbitrage routes grouped by route type |
+| `optimizer_iterations_total` | Counter | Number of numerical optimizer iterations used for V3-involving routes |
+| `gross_opportunities_total` | Counter | Number of positive gross arbitrage opportunities detected |
+| `gross_profit_usd_approx_total` | Counter | Cumulative approximate USD-like gross profit across detected opportunities |
+| `gross_profit_usd_approx_max` | Gauge | Maximum approximate USD-like gross profit observed for a single opportunity |
+
+The project intentionally does not expose a generic per-block wall-clock scan duration metric. Total scan time depends heavily on how many pools, route combinations, historical calls, and optimizer iterations are required for a specific block. Instead, the analyzer exposes workload-size and computational-cost metrics such as `eth_call_total`, `routes_evaluated_total`, and `optimizer_iterations_total`.
+
+The Prometheus Python client also exposes default Python and process metrics such as GC counters, resident memory, CPU seconds, open file descriptors, and Python version information.
+
+### Example Metrics Snapshot
+
+A 100-block historical backtest produced the following high-level metrics snapshot:
+
+```text
+blocks_scanned_total 100
+eth_call_total 1597747
+eth_call_errors_total 0
+routes_evaluated_total{route_type="v2/v2"} 2408
+routes_evaluated_total{route_type="v2/v3"} 4802
+routes_evaluated_total{route_type="v3/v2"} 4802
+routes_evaluated_total{route_type="v3/v3"} 4800
+optimizer_iterations_total 979436
+gross_opportunities_total 716
+gross_profit_usd_approx_total 24.807997948182084
+gross_profit_usd_approx_max 1.2049215016159638
+```
+
+The same run discovered pools across the configured DEX sources:
+
+```text
+pools_discovered_total{dex="uniswap_v2",type="v2"} 201
+pools_discovered_total{dex="sushiswap_v2",type="v2"} 201
+pools_discovered_total{dex="pancakeswap_v2",type="v2"} 201
+pools_discovered_total{dex="uniswap_v3",type="v3"} 804
+```
+
+The Anvil fork reset overhead was small relative to the route analysis workload:
+
+```text
+anvil_reset_latency_ms_count 101
+anvil_reset_latency_ms_sum 3198.650219477713
+```
+
+This corresponds to an average reset latency of approximately `31.7ms`, with `100/101` reset calls completing under `50ms`.
+
+For this run, the analyzer executed approximately `1.6M` historical state calls with zero call failures, evaluated `16.8k` cross-DEX routes, ran `979k` optimizer iterations for V3-containing paths, and detected `716` positive gross opportunities before gas and execution costs.
+
+---
+
 ## Configuration
 
 Create a `.env` file in the project root:
@@ -428,6 +512,8 @@ FINISH_BLOCK=25000020
 DEBUG_ENABLED=False
 OPTIMIZER_ITERATIONS=70
 ABI_DIR=./abi
+METRICS_ADDR=127.0.0.1
+METRICS_PORT=9100
 ```
 
 ---
@@ -443,6 +529,8 @@ ABI_DIR=./abi
 | `DEBUG_ENABLED` | Enables detailed pool, route, and optimizer logs when set to `True` |
 | `OPTIMIZER_ITERATIONS` | Number of iterations used by the numerical optimizer for V3-involving routes |
 | `ABI_DIR` | Directory containing ABI JSON files |
+| `METRICS_ADDR` | Address used by the lightweight Prometheus metrics HTTP endpoint |
+| `METRICS_PORT` | Port used by the lightweight Prometheus metrics HTTP endpoint |
 
 ---
 
@@ -453,6 +541,8 @@ Python dependencies are listed in:
 ```text
 requirements.txt
 ```
+
+The runtime metrics endpoint uses the Prometheus Python client.
 
 Install them with:
 
@@ -479,7 +569,13 @@ Start the analyzer with:
 python src/arbitrage_analyzer/main.py
 ```
 
-After startup, the script prints configuration information, resets Anvil to each target block, discovers pools, evaluates arbitrage routes, and prints gross opportunities for each block.
+After startup, the script prints configuration information, starts the Prometheus-compatible metrics endpoint, resets Anvil to each target block, discovers pools, evaluates arbitrage routes, and prints gross opportunities for each block.
+
+Read metrics with:
+
+```bash
+curl http://127.0.0.1:9100/metrics
+```
 
 ---
 
