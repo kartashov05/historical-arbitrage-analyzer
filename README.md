@@ -441,7 +441,7 @@ Metrics can be inspected directly with:
 curl http://127.0.0.1:9100/metrics
 ```
 
-### Custom Metrics
+### Metrics
 
 | Metric | Type | Description |
 | --- | --- | --- |
